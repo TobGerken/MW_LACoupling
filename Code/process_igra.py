@@ -25,12 +25,13 @@ def download_derived(ident, directory, server=None, verbose=1):
     else:
         message("File not found: ", directory + '/%s-drvd.txt.zip' % ident, verbose=verbose)
 
-def save_profiles(stations, data_path,start_time, end_time, force_download = False):
+def save_profiles(stations, data_path,start_time, end_time, server='https://www1.ncdc.noaa.gov/pub/data/igra/data/data-por/', force_download = False):
     import igra # https://github.com/MBlaschek/igra/blob/master/igra  # installed via: pip install igra
     import pandas as pd
     import glob
     import os
     import datetime
+    import sys
 
     os.chdir(data_path)
 
@@ -42,6 +43,7 @@ def save_profiles(stations, data_path,start_time, end_time, force_download = Fal
     sl = glob.glob('station_list*.txt')
     if not(sl):
         station_list = igra.download.stationlist(data_path)
+        #station_list
         station_list.to_csv('station_list_' + current_time + '.txt')
     else:
         station_list = pd.read_csv(sl[-1],index_col='id')
@@ -69,9 +71,11 @@ def save_profiles(stations, data_path,start_time, end_time, force_download = Fal
         if (not(glob.glob(d)) or force_download) :
             print(id)
             igra.download.station(id,data_path[0],server = server)
-            log_name = os.sep.join(data_path + [name] + ['DownloadedIGRA_' + pd.to_datetime("now").strftime('%Y%m%d_%H%M%S') + '.csv'])
+            log_name = os.sep.join(data_path + [name] + ['DownloadedIGRA_' + current_time + '.csv'])
 
-            processed_stations.loc[id].to_frame.to_csv(log_name)
+            #processed_stations.loc[id].to_frame.to_csv(log_name)
+            with open(log_name,'a') as f:
+                 f.write(f"{' '.join([name,id])}\n")
 
         log_name = os.sep.join(data_path + [name] + ['ExtractedProfiles_' + pd.to_datetime("now").strftime('%Y%m%d_%H%M%S') + '.csv'])
         processed_stations.loc[id].to_csv(log_name)
@@ -124,7 +128,7 @@ def save_derived(stations, data_path, derived_path, start_time, end_time, force_
         d = os.sep.join(derived_path + f)
         print(glob.glob(d))
         if (not(glob.glob(d)) or force_download):
-            download(id,derived_path)
+            download(id,derived_path[0])
         
         headers, _ = ascii_to_dataframe(glob.glob(d)[0], get_levels=False)
         
@@ -137,7 +141,7 @@ def save_derived(stations, data_path, derived_path, start_time, end_time, force_
         times= headers.index.hour
         headers.insert(0,column= 'hour', value=times)
         headers.index = headers.index.floor('D')
-        
+
         # 00Z      
         f = ['Derived_' + id +  '_' + timestr + '_00Z.csv']
         out = os.sep.join([data_path] + [name] + f)
