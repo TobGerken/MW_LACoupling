@@ -1,38 +1,153 @@
-# -*- coding: utf-8 -*-
+__all__ = ['download_derived',  'save_profiles', 'save_derived', 'ascii_to_dataframe']
 
-__all__ = ['derived','ascii_to_dataframe']
-
-def igra(ident, filename, variables=None, levels=None, return_table=False, **kwargs):
-    """ Read derived data for IGRA station
+def download_derived(ident, directory, server=None, verbose=1):
+    """ Download IGRAv2 Station from NOAA
     Args:
         ident (str): IGRA ID
-        filename (str): filename to read from
-        variables (list): select only these variables
-        levels (list): interpolate to these pressure levels [Pa]
-        return_table (bool): return odb like datatable
-        **kwargs:
-    Returns:
-        Dataset : derived information 
-        Dataset : station information
+        directory (str): output directory
+        server (str): download url
+        verbose (int): verboseness
     """
-    import xarray as xr
-    if '.nc' in filename:
-        data = xr.open_dataset(filename, **kwargs)
+    import urllib
+    import os
+    from igra.support import message
+
+    os.makedirs(directory, exist_ok=True)
+    if server is None:
+        server = 'https://www1.ncdc.noaa.gov/pub/data/igra/derived/derived-por/'
+    url = "%s/%s-drvd.txt.zip" % (server, ident)
+    message(url, ' to ', directory + '/%s-drvd.txt.zip' % ident, verbose=verbose)
+
+    urllib.request.urlretrieve(url, directory + '/%s-drvd.txt.zip' % ident)
+
+    if os.path.isfile(directory + '/%s-drvd.txt.zip' % ident):
+        message("Downloaded: ", directory + '/%s-drvd.txt.zip' % ident, verbose=verbose)
     else:
-        data, station = to_std_levels(ident, filename, levels=levels, return_table=return_table, **kwargs)
+        message("File not found: ", directory + '/%s-drvd.txt.zip' % ident, verbose=verbose)
 
-    if variables is not None:
-        avail = list(data.data_vars.keys())
-        if not isinstance(variables, list):
-            variables = [variables]
+def save_profiles(stations, data_path,start_time, end_time, force_download = False):
+    import igra # https://github.com/MBlaschek/igra/blob/master/igra  # installed via: pip install igra
+    import pandas as pd
+    import glob
+    import os
+    import datetime
 
-        variables = [iv for iv in variables if iv in avail]
-        if len(variables) > 0:
-            data = data[variables]  # subset
+    os.chdir(data_path)
 
-    return data, station
+    current_time = pd.to_datetime("now").strftime('%Y%m%d_%H%M%S')
+    tolerance = pd.to_timedelta('5 min')
 
+    # try to find station_list in data directory
+    # if not found download
+    sl = glob.glob('station_list*.txt')
+    if not(sl):
+        station_list = igra.download.stationlist(data_path)
+        station_list.to_csv('station_list_' + current_time + '.txt')
+    else:
+        station_list = pd.read_csv(sl[-1],index_col='id')
 
+    
+    # Create Processing Log and write to file 
+    processed_stations = station_list.loc[stations.values()].rename(columns={'start': 'record_start',
+                                                                             'end': 'record_end'})
+    processed_stations['start']=start_time.strftime('%Y%m%d')
+    processed_stations['end']=end_time.strftime('%Y%m%d')
+    logfile = 'ExtractedProfiles' + current_time + '.csv'
+    processed_stations.to_csv(logfile)
+
+    data_path = [data_path]
+    
+    # now loop over files and extract profiles 
+    for name, id in stations.items():
+        f  = [id + '*.zip']
+        d = os.sep.join(data_path + f)
+
+        if not os.path.exists(name):
+            os.mkdir(name)
+
+        #print(name, id)
+        if (not(glob.glob(d)) or force_download) :
+            print(id)
+            igra.download.station(id,data_path[0],server = server)
+            log_name = os.sep.join(data_path + [name] + ['DownloadedIGRA_' + pd.to_datetime("now").strftime('%Y%m%d_%H%M%S') + '.csv'])
+
+            processed_stations.loc[id].to_frame.to_csv(log_name)
+
+        log_name = os.sep.join(data_path + [name] + ['ExtractedProfiles_' + pd.to_datetime("now").strftime('%Y%m%d_%H%M%S') + '.csv'])
+        processed_stations.loc[id].to_csv(log_name)
+
+        # now loop over days 
+        #print(glob.glob(d)[0])
+        df, headers = igra.read.ascii_to_dataframe(glob.glob(d)[0],all_columns=True)
+
+        # get list of all soundings 
+        soundings = headers[start_time:end_time+pd.to_timedelta('23 h')].index.strftime('%Y-%m-%d %H').to_list()
+        soundings = headers[start_time:end_time+pd.to_timedelta('23 h')].index
+
+        # now loop over headers and get 
+        for sounding in soundings:
+            time_str = sounding.strftime('%Y%m%d_%H')
+            print(name + time_str)
+            f = [id +  '_' + time_str + 'Z.csv']
+            out = os.sep.join(data_path + [name] + f)
+
+            # add tolerance for key 
+
+            with open(out,'w') as f:
+                f.write(f"{','.join([name,id])}\n")
+                headers[sounding-tolerance : sounding+tolerance].iloc[0,1:].to_csv(f, mode='a', header=False,index=True,line_terminator='\n')       
+                df.loc[(df.index > sounding-tolerance) & (df.index < sounding+tolerance) & (df.ltyp1 !=3)].to_csv(f, mode='a', header=True, index=False,line_terminator='\n')
+
+            with open(log_name,'a') as f:
+                 f.write(f"{'_'.join([name,time_str])}\n")
+
+def save_derived(stations, data_path, derived_path, start_time, end_time, force_download = False):
+    import pandas as pd
+    import glob
+    import os
+    import datetime
+    from process_igra import download_derived as download
+    from process_igra import ascii_to_dataframe
+    
+    print(data_path)
+    os.chdir(data_path)
+
+    current_time = pd.to_datetime("now").strftime('%Y%m%d_%H%M%S')
+    tolerance = pd.to_timedelta('5 min')
+    
+    derived_path = [derived_path]
+    
+    # loop over stations and download/read ascii to pandas df
+    for name, id in stations.items():
+        # check if file exists or has to be downloaded 
+        f  = [id + '*.zip']
+        d = os.sep.join(derived_path + f)
+        print(glob.glob(d))
+        if (not(glob.glob(d)) or force_download):
+            download(id,derived_path)
+        
+        headers, _ = ascii_to_dataframe(glob.glob(d)[0], get_levels=False)
+        
+        # subset time
+        headers = headers.loc[start_time:end_time+pd.to_timedelta('23 h')]
+        #  save to csv and pickle separate for 00Z and 12Z soundings 
+        timestr = start_time.strftime('%Y%m%d') + 'to' + end_time.strftime('%Y%m%d')
+        
+        # get hours to separate into 00Zand 12Z
+        times= headers.index.hour
+        headers.insert(0,column= 'hour', value=times)
+        headers.index = headers.index.floor('D')
+        
+        # 00Z      
+        f = ['Derived_' + id +  '_' + timestr + '_00Z.csv']
+        out = os.sep.join([data_path] + [name] + f)
+        print(out)
+        headers.loc[times==0].to_csv(out,na_rep='NaN',index_label='date') 
+        
+        # 12      
+        f = ['Derived_' + id +  '_' + timestr + '_12Z.csv']
+        out = os.sep.join([data_path] + [name] + f)
+        headers.loc[times==12].to_csv(out,na_rep='NaN',index_label='date')     
 
 def ascii_to_dataframe(filename, get_levels=False, **kwargs):
     """Read IGRA version 2 Data from NOAA
@@ -300,7 +415,6 @@ def ascii_to_dataframe(filename, get_levels=False, **kwargs):
     import io
     import numpy as np
     import pandas as pd
-    from . import support as sp
 
     if not os.path.isfile(filename):
         raise IOError("File not Found! %s" % filename)
@@ -334,7 +448,7 @@ def ascii_to_dataframe(filename, get_levels=False, **kwargs):
             hour = line[24:26]
             reltime = line[27:31]
             numlev = int(line[32:36])
-            pw = int(line[37:45])
+            pw = int(line[37:43])
             invpress = int(line[43:49])
             invhgt  = int(line[49:55])
             invtempdif = int(line[55:61])
@@ -368,7 +482,7 @@ def ascii_to_dataframe(filename, get_levels=False, **kwargs):
             idate = datetime.datetime.strptime(year + month + day + time, '%Y%m%d%H%M%S')
             headers.append((idate, numlev, reltime, numlev, pw, invpress, invhgt, invtempdif, 
                             mixpress, mixhgt, frzpress, frzhgt, lclpress, lclhgt, lfcpress, 
-                            fchgt, lnbp, lnbhgt, li, si, ki, tti, cape, cin))
+                            lfchgt, lnbp, lnbhgt, li, si, ki, tti, cape, cin))
 
         else:
             # Data
@@ -392,23 +506,35 @@ def ascii_to_dataframe(filename, get_levels=False, **kwargs):
             vwndgrad = int(line[136:143])     #VWNDGRAD      137-143   Integer
             n = int(line[145:151])            #N             145-151   Integer
 
-            raw.append((press, repgph, calcgph, temp, tempgrad, ptemp, ptempgrad, vtemp,
+            if get_levels:
+                raw.append((press, repgph, calcgph, temp, tempgrad, ptemp, ptempgrad, vtemp,
                         vptemp, vappress, satvp, reprh, calcrh, rhgrad, uwnd, uwndgrad,
                         vwnd, vwndgrad, n))
 
-            dates.append(idate)
+                dates.append(idate)
 
     c = ['press', 'repgph', 'calcgph', 'temp', 'tempgrad', 'ptemp', 'ptempgrad', 'vtemp',
                         'vptemp', 'vappress', 'satvp', 'reprh', 'calcrh', 'rhgrad', 'uwnd', 'uwndgrad',
                         'vwnd', 'vwndgrad', 'n']
 
-    out = pd.DataFrame(data=raw, index=dates, columns=c)
-    out = out.replace([-999.9, -9999, -8888, -888.8], np.nan)  # known missing values by IGRAv2
-    out.index.name = 'date'
-
+    if get_levels:
+        out = pd.DataFrame(data=raw, index=dates, columns=c)
+        out = out.replace([-999.9, -9999, -8888, -888.8], np.nan)  # known missing values by IGRAv2
+        out.index.name = 'date'
+    else:
+        out = []
+        
     headers = pd.DataFrame(data=headers, columns=['idate', 'numlev', 'reltime', 'numlev', 'pw', 'invpress', 'invhgt', 'invtempdif', 
                                                 'mixpress', 'mixhgt', 'frzpress', 'frzhgt', 'lclpress', 'lclhgt', 'lfcpress', 
-                                                'fchgt', 'lnbp', 'lnbhgt', 'li', 'si', 'ki', 'tti', 'cape', 'cin']).set_index('date') 
+                                                'lfchgt', 'lnbp', 'lnbhgt', 'li', 'si', 'ki', 'tti', 'cape', 'cin']).set_index('idate') 
 
+    headers = headers.replace([-999.9, -9999, -8888, -888.8,-99999,-999999], np.nan)
+    headers['reltime']=headers['reltime'].replace([9999], np.nan)
     
-    return out, headers 
+    # convert units 
+    headers['pw'] = headers['pw']/100
+    headers['invtempdif'] = headers['invtempdif']/10
+    headers=headers.rename(columns={'pw':'pw_mm','invtempdif':'invtempdif_dC'} )
+    #headers.drop(['pw','invtempdif'],inplace =True,axis=1)
+    
+    return headers, out  
